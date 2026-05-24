@@ -181,6 +181,26 @@ def load_creator_data(creator_id):
     return notes
 
 @st.cache_data
+def load_all_creators():
+    """扫描所有数据文件，返回 {creator_id: nickname} 字典"""
+    creators = {}
+    seen = set()
+    for fp in sorted(glob.glob("data/**/*.json", recursive=True)):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                data = json.load(f)
+            for item in (data if isinstance(data, list) else [data]):
+                uid = item.get("user_id", "")
+                nid = item.get("note_id", "")
+                if uid and nid not in seen:
+                    seen.add(nid)
+                    if uid not in creators:
+                        creators[uid] = item.get("nickname") or item.get("user_name") or uid[:8]
+        except Exception:
+            pass
+    return creators
+
+@st.cache_data
 def load_notes():
     all_ids = {cid for ids in NICHES.values() for cid in ids}
     notes_by_creator = defaultdict(list)
@@ -240,47 +260,25 @@ with st.sidebar:
         options = ["全部博主"] + [CREATOR_NAMES[cid] for cid in creator_ids]
         selected_name = st.selectbox("博主", options)
         st.markdown("---")
+    elif page == "🎯 对标博主分析":
+        all_creators = load_all_creators()
+        creator_name_to_id = {name: uid for uid, name in all_creators.items()}
+        selected_target_name = st.selectbox("对标博主", list(creator_name_to_id.keys()))
+        selected_target_id = creator_name_to_id[selected_target_name]
+        topic_input = st.text_input("你要发的内容主题", placeholder="例如：虾肉馄饨")
+        st.markdown("---")
     st.caption("数据来自小红书，仅供学习参考")
 
 # ── 对标博主分析页 ─────────────────────────────────────────────
 if page == "🎯 对标博主分析":
-    st.title("🎯 对标博主分析")
-    st.caption("输入你想学习的博主主页链接，获取针对你内容主题的完整发布策略")
+    st.title(f"🎯 对标博主分析")
 
-    col_in1, col_in2 = st.columns([3, 2])
-    with col_in1:
-        url_input = st.text_input(
-            "博主主页链接",
-            placeholder="https://www.rednote.com/user/profile/...",
-        )
-    with col_in2:
-        topic_input = st.text_input(
-            "你想发的内容主题",
-            placeholder="例如：虾肉馄饨、家常炒菜",
-        )
-
-    if not url_input:
-        st.info("粘贴博主主页链接，开始分析")
-        st.stop()
-
-    creator_id = extract_creator_id(url_input)
-    if not creator_id:
-        st.error("无法识别博主ID，请粘贴完整的主页链接")
-        st.stop()
-
+    creator_id = selected_target_id
+    topic_input = topic_input  # from sidebar
     target_notes = load_creator_data(creator_id)
 
     if not target_notes:
-        st.warning(f"暂无该博主数据（ID: `{creator_id}`）")
-        st.markdown("**请先爬取数据：**")
-        st.code(
-            f'# 1. 在 MediaCrawler/config/xhs_config.py 的 XHS_CREATOR_ID_LIST 中添加：\n'
-            f'"{creator_id}",\n\n'
-            f'# 2. 运行爬虫：\n'
-            f'cd ~/Desktop/git/MediaCrawler\n'
-            f'uv run main.py --platform xhs --lt cookie --type creator',
-            language="bash",
-        )
+        st.warning("暂无数据，请先爬取该博主")
         st.stop()
 
     # ── 计算所有统计量 ──────────────────────────────────────────
