@@ -150,14 +150,20 @@ def extract_creator_id(text):
 def extract_tags(note):
     """从笔记数据中提取话题标签"""
     tags = []
-    for item in note.get("tag_list") or []:
-        if isinstance(item, dict):
-            name = item.get("name") or item.get("text") or ""
-            if name:
-                tags.append(name)
-        elif isinstance(item, str):
-            tags.append(item)
-    desc = note.get("desc") or note.get("title") or ""
+    tag_list = note.get("tag_list")
+    if isinstance(tag_list, str) and tag_list:
+        # 爬虫存储为逗号分隔字符串：e.g. "food,小零食,模特日常"
+        tags.extend(t.strip() for t in tag_list.split(",") if t.strip())
+    elif isinstance(tag_list, list):
+        for item in tag_list:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("text") or ""
+                if name:
+                    tags.append(name)
+            elif isinstance(item, str) and item:
+                tags.append(item)
+    # 兜底：从 desc 正文抽取 #话题
+    desc = note.get("desc") or ""
     tags += re.findall(r'#([^\s#\[\]]+)', desc)
     return list(set(tags))
 
