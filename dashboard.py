@@ -71,6 +71,8 @@ CREATOR_INSIGHTS = {
     },
 }
 
+WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
 STOP_WORDS = {
     "了", "的", "是", "在", "我", "你", "他", "她", "它", "们",
     "这", "那", "有", "和", "与", "也", "都", "就", "不", "一",
@@ -135,6 +137,49 @@ def extract_words(title):
                         words.append(w)
     return words
 
+def extract_creator_id(text):
+    """从URL或直接输入提取博主ID"""
+    m = re.search(r'/user/profile/([a-z0-9]+)', text.strip())
+    if m:
+        return m.group(1)
+    t = text.strip()
+    if re.match(r'^[a-z0-9]{20,}$', t):
+        return t
+    return None
+
+def extract_tags(note):
+    """从笔记数据中提取话题标签"""
+    tags = []
+    for item in note.get("tag_list") or []:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("text") or ""
+            if name:
+                tags.append(name)
+        elif isinstance(item, str):
+            tags.append(item)
+    desc = note.get("desc") or note.get("title") or ""
+    tags += re.findall(r'#([^\s#\[\]]+)', desc)
+    return list(set(tags))
+
+@st.cache_data
+def load_creator_data(creator_id):
+    """加载任意博主的数据（按ID匹配）"""
+    notes, seen = [], set()
+    for fp in sorted(glob.glob("data/**/*.json", recursive=True)):
+        try:
+            with open(fp, encoding="utf-8") as f:
+                data = json.load(f)
+            for item in (data if isinstance(data, list) else [data]):
+                if item.get("user_id") == creator_id:
+                    nid = item.get("note_id", "")
+                    if nid not in seen:
+                        seen.add(nid)
+                        notes.append(item)
+        except Exception:
+            pass
+    notes.sort(key=lambda n: parse_time(n.get("time")) or datetime.min)
+    return notes
+
 @st.cache_data
 def load_notes():
     all_ids = {cid for ids in NICHES.values() for cid in ids}
@@ -187,12 +232,316 @@ with st.sidebar:
     st.title("博主起号分析")
     st.caption("互动总量 = 点赞 + 收藏×2 + 评论")
     st.markdown("---")
-    selected_niche = st.selectbox("赛道", list(NICHES.keys()))
-    creator_ids = [cid for cid in NICHES[selected_niche] if cid in all_notes]
-    options = ["全部博主"] + [CREATOR_NAMES[cid] for cid in creator_ids]
-    selected_name = st.selectbox("博主", options)
+    page = st.radio("page", ["📊 赛道概览", "🎯 对标博主分析"], label_visibility="collapsed")
     st.markdown("---")
+    if page == "📊 赛道概览":
+        selected_niche = st.selectbox("赛道", list(NICHES.keys()))
+        creator_ids = [cid for cid in NICHES[selected_niche] if cid in all_notes]
+        options = ["全部博主"] + [CREATOR_NAMES[cid] for cid in creator_ids]
+        selected_name = st.selectbox("博主", options)
+        st.markdown("---")
     st.caption("数据来自小红书，仅供学习参考")
+
+# ── 对标博主分析页 ─────────────────────────────────────────────
+if page == "🎯 对标博主分析":
+    st.title("🎯 对标博主分析")
+    st.caption("输入你想学习的博主主页链接，获取针对你内容主题的完整发布策略")
+
+    col_in1, col_in2 = st.columns([3, 2])
+    with col_in1:
+        url_input = st.text_input(
+            "博主主页链接",
+            placeholder="https://www.rednote.com/user/profile/...",
+        )
+    with col_in2:
+        topic_input = st.text_input(
+            "你想发的内容主题",
+            placeholder="例如：虾肉馄饨、家常炒菜",
+        )
+
+    if not url_input:
+        st.info("粘贴博主主页链接，开始分析")
+        st.stop()
+
+    creator_id = extract_creator_id(url_input)
+    if not creator_id:
+        st.error("无法识别博主ID，请粘贴完整的主页链接")
+        st.stop()
+
+    target_notes = load_creator_data(creator_id)
+
+    if not target_notes:
+        st.warning(f"暂无该博主数据（ID: `{creator_id}`）")
+        st.markdown("**请先爬取数据：**")
+        st.code(
+            f'# 1. 在 MediaCrawler/config/xhs_config.py 的 XHS_CREATOR_ID_LIST 中添加：\n'
+            f'"{creator_id}",\n\n'
+            f'# 2. 运行爬虫：\n'
+            f'cd ~/Desktop/git/MediaCrawler\n'
+            f'uv run main.py --platform xhs --lt cookie --type creator',
+            language="bash",
+        )
+        st.stop()
+
+    # ── 计算所有统计量 ──────────────────────────────────────────
+    t_engs = [calc_eng(n) for n in target_notes]
+    t_avg = int(sum(t_engs) / len(t_engs)) if t_engs else 0
+    t_top10 = sorted(t_engs, reverse=True)[max(0, len(t_engs) // 10)] if len(t_engs) >= 10 else 0
+    t_viral = [n for n, e in zip(target_notes, t_engs) if e >= t_top10]
+    t_normal = [n for n, e in zip(target_notes, t_engs) if e < t_top10]
+    t_name = (
+        target_notes[0].get("nickname") or target_notes[0].get("user_name") or
+        target_notes[0].get("author") or creator_id[:8]
+    )
+    t_first = parse_time(target_notes[0].get("time"))
+
+    # 标题词频
+    t_viral_wc = Counter()
+    for n in t_viral:
+        t_viral_wc.update(extract_words(n.get("title") or n.get("desc") or ""))
+
+    # 话题标签
+    t_all_tags = Counter()
+    for n in (t_viral if t_viral else target_notes):
+        t_all_tags.update(extract_tags(n))
+
+    # 标题长度
+    t_viral_lens  = [len(n.get("title") or n.get("desc") or "") for n in t_viral]
+    t_normal_lens = [len(n.get("title") or n.get("desc") or "") for n in t_normal]
+
+    # 时间数据
+    t_timed = [(parse_time(n.get("time")), calc_eng(n)) for n in target_notes]
+    t_timed = [(t, e) for t, e in t_timed if t is not None]
+    t_viral_times = [t for t, e in t_timed if e >= t_top10]
+    t_all_sorted  = sorted(t for t, e in t_timed)
+    t_avg_intv, t_ppw = None, None
+    if len(t_all_sorted) >= 2:
+        t_intervals = [(t_all_sorted[i+1] - t_all_sorted[i]).days for i in range(len(t_all_sorted)-1)]
+        t_avg_intv = sum(t_intervals) / len(t_intervals)
+        t_ppw = round(7 / t_avg_intv, 1) if t_avg_intv > 0 else 0
+    t_best_wd_names = []
+    if t_viral_times:
+        t_best_wd_names = [WEEKDAY_NAMES[i] for i, _ in Counter(t.weekday() for t in t_viral_times).most_common(2)]
+    t_hour_eng = defaultdict(list)
+    for t, e in t_timed:
+        t_hour_eng[t.hour].append(e)
+    t_hour_avg = {h: int(sum(v)/len(v)) for h, v in t_hour_eng.items()}
+    t_hour_cnt = {h: len(v) for h, v in t_hour_eng.items()}
+
+    # 内容类型
+    t_video_notes = [n for n in target_notes if n.get("note_type") == "video"]
+    t_img_notes   = [n for n in target_notes if n.get("note_type") != "video"]
+    t_video_avg = int(sum(calc_eng(n) for n in t_video_notes) / len(t_video_notes)) if t_video_notes else 0
+    t_img_avg   = int(sum(calc_eng(n) for n in t_img_notes)   / len(t_img_notes))   if t_img_notes   else 0
+    t_v_desc_lens = [len(n.get("desc") or "") for n in t_viral]
+    t_n_desc_lens = [len(n.get("desc") or "") for n in t_normal]
+
+    # 推广信号
+    t_sorted_engs = sorted(t_engs, reverse=True)
+    t_top1_ratio = t_sorted_engs[0] / (t_sorted_engs[1] if len(t_sorted_engs) > 1 else 1) if len(t_sorted_engs) >= 2 else 1
+
+    # ── 概览 ───────────────────────────────────────────────────
+    st.subheader(f"📊 {t_name} 数据概览")
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("笔记总数", len(target_notes))
+    mc2.metric("平均互动", f"{t_avg:,}")
+    mc3.metric("爆文门槛", f"{t_top10:,}")
+    mc4.metric("爆文数量", f"{len(t_viral)} 篇")
+    if t_first:
+        st.caption(f"最早记录：{t_first.strftime('%Y-%m')}")
+    st.markdown("---")
+
+    ta, tb, tc, td = st.tabs(["📌 标题 & 标签", "⏰ 发布节奏", "📝 内容形式", "🎯 我的策略"])
+
+    # ── Tab A ──────────────────────────────────────────────────
+    with ta:
+        col_w, col_t = st.columns(2)
+        with col_w:
+            st.markdown("**爆文标题高频词 (Top 20)**")
+            if t_viral_wc:
+                st.dataframe(
+                    pd.DataFrame(t_viral_wc.most_common(20), columns=["词", "频次"]),
+                    hide_index=True, use_container_width=True,
+                )
+            else:
+                st.caption("暂无足够爆文数据")
+        with col_t:
+            label = "爆文" if t_viral else "全量"
+            st.markdown(f"**{label}高频话题标签 (Top 20)**")
+            if t_all_tags:
+                st.dataframe(
+                    pd.DataFrame(t_all_tags.most_common(20), columns=["标签", "次数"]),
+                    hide_index=True, use_container_width=True,
+                )
+            else:
+                st.caption("暂无标签（desc字段无#话题）")
+        st.markdown("---")
+        st.markdown("**标题长度对比**")
+        if t_viral_lens:
+            tl1, tl2 = st.columns(2)
+            tl1.metric("爆文平均标题长度", f"{sum(t_viral_lens)//len(t_viral_lens)} 字")
+            if t_normal_lens:
+                tl2.metric("普通帖平均标题长度", f"{sum(t_normal_lens)//len(t_normal_lens)} 字")
+
+    # ── Tab B ──────────────────────────────────────────────────
+    with tb:
+        if t_timed:
+            t_viral_wd = Counter(t.weekday() for t in t_viral_times)
+            st.markdown("**爆文发布日分布**")
+            st.bar_chart(pd.DataFrame(
+                {"爆文次数": [t_viral_wd.get(i, 0) for i in range(7)]},
+                index=WEEKDAY_NAMES,
+            ))
+            if t_avg_intv is not None:
+                bf1, bf2 = st.columns(2)
+                bf1.metric("平均发帖间隔", f"{t_avg_intv:.1f} 天")
+                bf2.metric("约每周发帖", f"{t_ppw} 篇")
+            t_hour_df = pd.DataFrame({
+                "发布篇数": [t_hour_cnt.get(h, 0) for h in range(24)],
+                "平均互动": [t_hour_avg.get(h, 0) for h in range(24)],
+            }, index=[f"{h}时" for h in range(24)])
+            bh1, bh2 = st.columns(2)
+            with bh1:
+                st.markdown("**发布时段分布**")
+                st.bar_chart(t_hour_df[["发布篇数"]])
+            with bh2:
+                st.markdown("**时段平均互动**")
+                st.bar_chart(t_hour_df[["平均互动"]])
+
+    # ── Tab C ──────────────────────────────────────────────────
+    with tc:
+        t_type_eng = defaultdict(list)
+        for n, e in zip(target_notes, t_engs):
+            t_type_eng[n.get("note_type", "normal")].append(e)
+        ct1, ct2 = st.columns(2)
+        with ct1:
+            t_type_df = pd.DataFrame({"数量": Counter(n.get("note_type", "normal") for n in target_notes)})
+            t_type_df.index = t_type_df.index.map(lambda x: "视频" if x == "video" else "图文")
+            st.markdown("**笔记类型数量**")
+            st.bar_chart(t_type_df)
+        with ct2:
+            t_type_avg_eng = {k: int(sum(v)/len(v)) for k, v in t_type_eng.items() if v}
+            t_avg_eng_df = pd.DataFrame({"平均互动": t_type_avg_eng})
+            t_avg_eng_df.index = t_avg_eng_df.index.map(lambda x: "视频" if x == "video" else "图文")
+            st.markdown("**类型平均互动**")
+            st.bar_chart(t_avg_eng_df)
+        st.markdown("---")
+        st.markdown("**正文长度（爆文 vs 普通）**")
+        if t_v_desc_lens:
+            dl1, dl2 = st.columns(2)
+            dl1.metric("爆文平均正文", f"{sum(t_v_desc_lens)//len(t_v_desc_lens)} 字")
+            if t_n_desc_lens:
+                dl2.metric("普通帖平均正文", f"{sum(t_n_desc_lens)//len(t_n_desc_lens)} 字")
+        st.markdown("---")
+        st.markdown("**高收藏率内容 Top 8**（收藏/点赞比高 = 干货/合集属性强）")
+        df_tc = to_df(target_notes)
+        df_tc = df_tc[df_tc["点赞"] > 0].copy()
+        df_tc["收藏点赞比"] = (df_tc["收藏"] / df_tc["点赞"]).round(2)
+        st.dataframe(
+            df_tc.nlargest(8, "收藏点赞比")[["日期", "标题", "点赞", "收藏", "收藏点赞比"]],
+            hide_index=True, use_container_width=True,
+        )
+
+    # ── Tab D: 我的策略 ────────────────────────────────────────
+    with td:
+        topic = topic_input.strip() if topic_input else "你的内容"
+        st.markdown(f"### 针对「{topic}」的完整发布策略")
+        st.caption(f"基于 {t_name} 的 {len(target_notes)} 篇笔记数据分析")
+
+        st.markdown("#### ① 标题怎么写")
+        if t_viral_wc:
+            top5_words = [w for w, _ in t_viral_wc.most_common(5)]
+            st.success(
+                f"该博主爆文标题高频词：**{'、'.join(top5_words)}**\n\n"
+                f"**套用到你的内容：**\n"
+                f"- 「这个{topic}太太太好吃了啊！快去做」\n"
+                f"- 「{topic}这样做，香哭了！一口一个停不下来」\n"
+                f"- 「学了{topic}这个做法，再也不想点外卖了」\n\n"
+                f"**核心公式：叠词放大情绪（太太太/嘎嘎香）+ 结果描述 + 行动号召**"
+            )
+        else:
+            st.info(f"建议参考套路：「这个{topic}太好吃了！」+ 情绪叠词 + 行动号召")
+
+        st.markdown("#### ② 发哪些话题标签")
+        if t_all_tags:
+            top10_tags = [f"#{t}" for t, _ in t_all_tags.most_common(10)]
+            st.info(
+                f"直接复用该博主爆文高频标签：\n\n"
+                f"{'  '.join(top10_tags)}\n\n"
+                f"💡 额外加上精准标签：**#{topic}** 及相关细分标签（如 #馄饨 #家常做法 #下饭菜）"
+            )
+
+        st.markdown("#### ③ 发布频率")
+        if t_avg_intv is not None:
+            st.warning(
+                f"该博主平均每 **{t_avg_intv:.1f} 天** 发一篇（约每周 {t_ppw} 篇）\n\n"
+                f"**新号建议：** 每周至少 **{max(2, int(round(t_ppw)))} 篇**，"
+                f"前3个月不能断更——平台需要持续信号才会给你贴标签、建立推流模型。"
+            )
+        else:
+            st.warning("建议每周2-3篇，持续3个月再看数据。")
+
+        st.markdown("#### ④ 图文 vs 视频")
+        if t_video_avg >= t_img_avg and t_video_notes:
+            st.success(
+                f"该博主视频平均互动（{t_video_avg:,}）>= 图文（{t_img_avg:,}）\n\n"
+                f"**建议做视频。** {topic} 适合展示烹饪过程，1-3分钟最佳，"
+                f"剪辑节奏快，背景用欢快轻音乐，加字幕。"
+            )
+        elif t_img_notes:
+            st.success(
+                f"该博主图文平均互动（{t_img_avg:,}）{'>' if t_img_avg > t_video_avg else '>='} 视频（{t_video_avg:,}）\n\n"
+                f"**图文也很有效。** 做4-9张图，第一张是封面，后面是步骤图+成品图。"
+            )
+        else:
+            st.info("建议优先做视频，更容易被推流。")
+
+        st.markdown("#### ⑤ 什么时候发")
+        if t_best_wd_names:
+            st.info(
+                f"该博主爆文集中在 **{'、'.join(t_best_wd_names)}** 发布\n\n"
+                f"**通用建议：晚18-21时**（晚饭后高峰）或 **午12时**（午休刷机峰值）"
+            )
+        else:
+            st.info("**建议时段：晚18-21时**（晚饭后高峰）或 **午12时**（午休刷机峰值）")
+
+        st.markdown("#### ⑥ 封面怎么做")
+        st.info(
+            f"**参考该博主 Top 爆文封面风格：**\n"
+            f"- 食物/成品大近景，占画面 60-80%\n"
+            f"- 叠加大字标题（例如「太好吃了」「{topic}的正确打开方式」）\n"
+            f"- 色调偏暖（橙/黄/红），刺激食欲\n"
+            f"- 视频封面：用最诱人的那帧成品镜头，不要用食材备料图"
+        )
+
+        st.markdown("#### ⑦ 要不要买薯条/推广")
+        if t_top1_ratio > 5:
+            st.warning(
+                f"该博主最高单篇互动是第二名的 **{t_top1_ratio:.0f}x**，可能有推广加持。\n\n"
+                f"**建议：** 先不买。把前5篇打磨好（标题+封面+内容），"
+                f"等出现一篇自然流量好的帖子，再用薯条加热（¥50-200起），ROI 更高。"
+            )
+        else:
+            st.success(
+                f"该博主没有明显推广异常，靠自然流量起号。\n\n"
+                f"**建议：暂不买推广**，专注内容质量。"
+                f"若3个月后数据仍差，再考虑薯条测试单篇潜力。"
+            )
+
+        st.markdown("#### ⑧ 必看对标爆文（直接打开学习）")
+        st.caption("学习：标题结构、封面风格、正文格式、标签选择")
+        for n, e in sorted(zip(target_notes, t_engs), key=lambda x: x[1], reverse=True)[:5]:
+            title = n.get("title") or n.get("desc") or "(无标题)"
+            url   = n.get("note_url", "")
+            t_dt  = parse_time(n.get("time"))
+            ds    = t_dt.strftime("%Y-%m-%d") if t_dt else "未知"
+            line  = f"**互动 {e:,}** · {ds} · {title[:45]}"
+            if url:
+                st.markdown(f"- [{title[:45]}]({url})  |  {ds}  |  互动 {e:,}")
+            else:
+                st.markdown(f"- {title[:45]}  |  {ds}  |  互动 {e:,}")
+
+    st.stop()
 
 # ── 概览页 ─────────────────────────────────────────────────────
 if selected_name == "全部博主":
@@ -393,8 +742,6 @@ else:
 
     # ── 发布策略 ───────────────────────────────────────────────
     with tab5:
-        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-
         timed = [(parse_time(n.get("time")), calc_eng(n)) for n in notes]
         timed = [(t, e) for t, e in timed if t is not None]
 
@@ -412,13 +759,13 @@ else:
             wd_df = pd.DataFrame({
                 "爆文":  [viral_wd.get(i, 0)  for i in range(7)],
                 "普通帖": [normal_wd.get(i, 0) for i in range(7)],
-            }, index=weekday_names)
+            }, index=WEEKDAY_NAMES)
             st.bar_chart(wd_df)
 
             # 爆文率最高的日子
             all_wd = Counter(t.weekday() for t in all_times)
             best_days = sorted(
-                [(weekday_names[i], viral_wd.get(i, 0), all_wd.get(i, 0))
+                [(WEEKDAY_NAMES[i], viral_wd.get(i, 0), all_wd.get(i, 0))
                  for i in range(7) if all_wd.get(i, 0) >= 2],
                 key=lambda x: x[1] / x[2],
                 reverse=True,
