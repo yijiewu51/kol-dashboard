@@ -256,7 +256,7 @@ else:
             st.markdown(f"**起号类型：** {insights['strategy']}　　**起号难度：** {insights.get('start_difficulty','')}")
 
     st.markdown("---")
-    tab1, tab2, tab3, tab4 = st.tabs(["🚀 起号期", "📈 全期趋势", "🏆 Top 爆文", "💡 内容规律"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["🚀 起号期", "📈 全期趋势", "🏆 Top 爆文", "💡 内容规律", "⏰ 发布策略"])
 
     # ── 起号期 ─────────────────────────────────────────────────
     with tab1:
@@ -390,3 +390,118 @@ else:
         top_save = df3.nlargest(8, "收藏点赞比")[["日期", "标题", "点赞", "收藏", "收藏点赞比"]]
         st.caption("收藏/点赞比越高，说明内容「干货/合集」属性越强，更容易被保存反复查看")
         st.dataframe(top_save, hide_index=True, use_container_width=True)
+
+    # ── 发布策略 ───────────────────────────────────────────────
+    with tab5:
+        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+        timed = [(parse_time(n.get("time")), calc_eng(n)) for n in notes]
+        timed = [(t, e) for t, e in timed if t is not None]
+
+        if not timed:
+            st.info("暂无时间数据")
+        else:
+            viral_times  = [t for t, e in timed if e >= top10_threshold]
+            normal_times = [t for t, e in timed if e < top10_threshold]
+            all_times    = [t for t, e in timed]
+
+            # ── 星期分布 ──────────────────────────────────────
+            st.markdown("##### 发布日分布（爆文 vs 普通帖）")
+            viral_wd  = Counter(t.weekday() for t in viral_times)
+            normal_wd = Counter(t.weekday() for t in normal_times)
+            wd_df = pd.DataFrame({
+                "爆文":  [viral_wd.get(i, 0)  for i in range(7)],
+                "普通帖": [normal_wd.get(i, 0) for i in range(7)],
+            }, index=weekday_names)
+            st.bar_chart(wd_df)
+
+            # 爆文率最高的日子
+            all_wd = Counter(t.weekday() for t in all_times)
+            best_days = sorted(
+                [(weekday_names[i], viral_wd.get(i, 0), all_wd.get(i, 0))
+                 for i in range(7) if all_wd.get(i, 0) >= 2],
+                key=lambda x: x[1] / x[2],
+                reverse=True,
+            )
+
+            # ── 小时分布 ──────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 发布时段分析（小时维度）")
+            hour_eng = defaultdict(list)
+            for t, e in timed:
+                hour_eng[t.hour].append(e)
+            hour_avg   = {h: int(sum(v) / len(v)) for h, v in hour_eng.items()}
+            hour_count = {h: len(v) for h, v in hour_eng.items()}
+
+            hour_df = pd.DataFrame({
+                "发布篇数": [hour_count.get(h, 0) for h in range(24)],
+                "平均互动": [hour_avg.get(h, 0)   for h in range(24)],
+            }, index=[f"{h}时" for h in range(24)])
+
+            col_h1, col_h2 = st.columns(2)
+            with col_h1:
+                st.markdown("**各时段发布数量**")
+                st.bar_chart(hour_df[["发布篇数"]])
+            with col_h2:
+                st.markdown("**各时段平均互动**")
+                st.bar_chart(hour_df[["平均互动"]])
+
+            # ── 起号期节奏 ────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 起号期发布节奏（前20篇）")
+            early_times = sorted(t for t, e in timed[:20])
+            if len(early_times) >= 2:
+                intervals = [(early_times[i+1] - early_times[i]).days
+                             for i in range(len(early_times) - 1)]
+                avg_interval  = sum(intervals) / len(intervals)
+                posts_per_week = round(7 / avg_interval, 1) if avg_interval > 0 else 0
+                span_days = (early_times[-1] - early_times[0]).days
+
+                col_f1, col_f2, col_f3 = st.columns(3)
+                col_f1.metric("平均发帖间隔", f"{avg_interval:.1f} 天")
+                col_f2.metric("折合每周篇数", f"{posts_per_week} 篇")
+                col_f3.metric("前20篇跨越", f"{span_days} 天")
+            else:
+                avg_interval = posts_per_week = None
+
+            # ── 综合建议 ──────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 📋 发布建议（基于该博主数据）")
+
+            lines = []
+
+            if best_days:
+                top2 = " / ".join(d[0] for d in best_days[:2])
+                lines.append(f"**📅 优先发布日：{top2}** — 该博主爆文在这些天发布比例最高")
+
+            good_hours = sorted(
+                [(h, avg) for h, avg in hour_avg.items() if hour_count[h] >= 2],
+                key=lambda x: x[1], reverse=True
+            )
+            if good_hours:
+                top_hrs = " / ".join(f"{h}时" for h, _ in good_hours[:3])
+                lines.append(f"**⏰ 高互动时段：{top_hrs}** — 这些时段发布的帖子平均互动最高")
+
+            if avg_interval is not None:
+                if posts_per_week >= 5:
+                    freq_tip = f"高频日更（该博主每 {avg_interval:.1f} 天一篇）"
+                elif posts_per_week >= 3:
+                    freq_tip = f"每周3-4篇稳定更新（该博主每 {avg_interval:.1f} 天一篇）"
+                else:
+                    freq_tip = f"每周约 {posts_per_week} 篇（该博主每 {avg_interval:.1f} 天一篇）"
+                lines.append(f"**📊 发布频率：{freq_tip}**")
+
+            creator_tips = {
+                "5aabcb2d11be105d1a3c83b0": "鱼鱼食记的爆文靠标题情绪，不靠时间点——先把「太太太好吃了啊」系列标题公式练熟，时间选对了但标题平淡也不会爆。",
+                "6300e2d8000000001501a130": "桃小姐的高收藏合集内容适合周末发（用户有时间浏览和收藏），工作日发相对简单的单菜内容。",
+                "64b3b15c000000001c02b369": "开心一点啦蛰伏一年多才爆——说明在找到「留学生做饭」这个独特角度之前，时间策略意义不大。先确定内容差异化方向。",
+                "5940f32182ec3947cc227ebe": "日食记是大号，发布时间高度规律，适合作为参考，但起号期不需要这么严格。",
+                "5fc67ee70000000001002f7a": "小辰吾妮是情感类博主，其时间规律对做饭赛道参考价值有限。",
+            }
+            if cid in creator_tips:
+                lines.append(f"**💡 特别提示：** {creator_tips[cid]}")
+
+            lines.append("**🎯 小红书通用高峰：** 早7-9时（上班路上）、午12时（午休）、晚18-21时（饭后）— 建议在这三个窗口内选时发布")
+
+            for line in lines:
+                st.markdown(f"- {line}")
